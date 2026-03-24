@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 
 
-# ── CLI ──────────────────────────────────────────────────────────────────
+#CLI
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-# ── Loader ───────────────────────────────────────────────────────────────
+#Loader
 
 def load_airfoil_csv(path: Path) -> dict:
     """Load a Selig-format airfoil CSV (x,y with header).
@@ -38,20 +38,38 @@ def load_airfoil_csv(path: Path) -> dict:
     """
     with path.open(newline="", encoding="utf-8") as f:
         reader = csv.reader(f)
-        next(reader)  # skip header
-        rows = [list(map(float, row)) for row in reader]
+        try:
+            next(reader)  #skip header
+        except StopIteration:
+            raise ValueError(f"CSV file is empty: {path}")
+        try:
+            rows = [list(map(float, row)) for row in reader]
+        except ValueError as exc:
+            raise ValueError(f"Non-numeric data in CSV {path}: {exc}")
+
+    if not rows:
+        raise ValueError(f"CSV file contains no data rows: {path}")
 
     data = np.array(rows)
+    if not np.all(np.isfinite(data)):
+        raise ValueError(f"CSV contains NaN or Inf values: {path}")
+
     x_all = data[:, 0]
     y_all = data[:, 1]
 
-    le_idx = int(np.argmin(x_all))  # leading-edge row
+    le_idx = int(np.argmin(x_all))  #leading-edge row
 
-    # upper surface: TE → LE (reverse so x is ascending)
+    if le_idx < 1 or le_idx >= len(x_all) - 1:
+        raise ValueError(
+            f"Leading edge at boundary (idx={le_idx}, n={len(x_all)}) — "
+            f"cannot split into upper/lower surfaces: {path}"
+        )
+
+    #upper surface: TE → LE (reverse so x is ascending)
     upper_x = x_all[: le_idx + 1][::-1]
     upper_y = y_all[: le_idx + 1][::-1]
 
-    # lower surface: LE → TE (already ascending in x)
+    #lower surface: LE → TE (already ascending in x)
     lower_x = x_all[le_idx:]
     lower_y = y_all[le_idx:]
 
@@ -63,7 +81,7 @@ def load_airfoil_csv(path: Path) -> dict:
     }
 
 
-# ── Comparison ───────────────────────────────────────────────────────────
+#Comparison
 
 def interpolate_to_grid(surface_x, surface_y, grid):
     """Linearly interpolate a surface onto a common x-grid."""
@@ -99,7 +117,7 @@ def least_squares_compare(image_norm: dict, base: dict, n_points: int) -> dict:
     }
 
 
-# ── Main ─────────────────────────────────────────────────────────────────
+#Main
 
 def main() -> int:
     args = parse_args()
@@ -113,15 +131,22 @@ def main() -> int:
     if not base_path.is_file():
         print(f"Error: base airfoil CSV not found: {base_path}", file=sys.stderr)
         return 1
+    if args.n_points < 2:
+        print("Error: --n-points must be at least 2", file=sys.stderr)
+        return 1
 
-    # load both as selig-format CSVs
-    image_data = load_airfoil_csv(image_path)
-    base_data = load_airfoil_csv(base_path)
+    #load both as selig-format CSVs
+    try:
+        image_data = load_airfoil_csv(image_path)
+        base_data = load_airfoil_csv(base_path)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
 
-    # compare
+    #compare
     result = least_squares_compare(image_data, base_data, args.n_points)
 
-    # output
+    #output
     print(f"Base airfoil : {base_path.stem}")
     print(f"RMSE (total) : {result['rmse']:.6f}")
     print(f"RMSE (upper) : {result['upper_rmse']:.6f}")

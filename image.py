@@ -213,8 +213,9 @@ def normalize_to_selig(xs, top_curve, bottom_curve):
     lower_sorted = lower_y[order]
 
     #selig order: upper surface TE→LE (x descending), then lower LE→TE (x ascending)
-    selig_x = np.concatenate([x_sorted[::-1], x_sorted])
-    selig_y = np.concatenate([upper_sorted[::-1], lower_sorted])
+    #skip first point of lower surface to avoid duplicating the leading edge
+    selig_x = np.concatenate([x_sorted[::-1], x_sorted[1:]])
+    selig_y = np.concatenate([upper_sorted[::-1], lower_sorted[1:]])
 
     return selig_x, selig_y
 
