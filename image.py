@@ -185,14 +185,48 @@ def extract_surface_curves(mask):
 
 #output helpers
 
-#write airfoil surface data to csv (x, top_y, bottom_y)
-def write_csv(xs, top_curve, bottom_curve, output_path: Path) -> None:
+#normalize pixel surfaces to chord=1 and arrange in selig order (TE→LE upper, LE→TE lower)
+def normalize_to_selig(xs, top_curve, bottom_curve):
+    x = xs.astype(float)
+    top = top_curve.astype(float)
+    bot = bottom_curve.astype(float)
+
+    x_min, x_max = x.min(), x.max()
+    chord = x_max - x_min
+    if chord == 0:
+        raise RuntimeError("Extracted airfoil has zero chord length.")
+
+    x_norm = (x - x_min) / chord
+
+    #y-reference: camber midpoint at trailing edge (max x)
+    te_idx = int(np.argmax(x_norm))
+    y_ref = (top[te_idx] + bot[te_idx]) / 2.0
+
+    #negate to flip pixel-y (down) → aero-y (up), normalize by chord
+    upper_y = -(top - y_ref) / chord
+    lower_y = -(bot - y_ref) / chord
+
+    #sort ascending in x for splitting
+    order = np.argsort(x_norm)
+    x_sorted = x_norm[order]
+    upper_sorted = upper_y[order]
+    lower_sorted = lower_y[order]
+
+    #selig order: upper surface TE→LE (x descending), then lower LE→TE (x ascending)
+    selig_x = np.concatenate([x_sorted[::-1], x_sorted])
+    selig_y = np.concatenate([upper_sorted[::-1], lower_sorted])
+
+    return selig_x, selig_y
+
+
+#write normalized airfoil data to csv in selig format (x, y)
+def write_csv(selig_x, selig_y, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["x", "top_y", "bottom_y"])
-        for x, ty, by in zip(xs, top_curve, bottom_curve):
-            writer.writerow([int(x), int(ty), int(by)])
+        writer.writerow(["x", "y"])
+        for x, y in zip(selig_x, selig_y):
+            writer.writerow([f"{x:.7f}", f"{y:.7f}"])
 
 
 #draw top (red) and bottom (green) curves onto image copy
@@ -243,15 +277,16 @@ def main() -> int:
     xs, top_curve, bottom_curve = extract_surface_curves(mask)
     preview = make_preview(image, xs, top_curve, bottom_curve)
 
-    #write outputs
-    write_csv(xs, top_curve, bottom_curve, csv_path)
+    #normalize to chord=1 selig format and write
+    selig_x, selig_y = normalize_to_selig(xs, top_curve, bottom_curve)
+    write_csv(selig_x, selig_y, csv_path)
     preview_dir.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(preview_path), preview)
 
     print(f"Input image: {input_path}")
     print(f"CSV output: {csv_path}")
     print(f"Preview image: {preview_path}")
-    print(f"Curve samples written: {len(xs)}")
+    print(f"Curve samples written: {len(selig_x)}")
 
     if not args.no_show:
         show_preview(preview, input_path)
