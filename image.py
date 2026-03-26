@@ -387,11 +387,14 @@ def show_preview(preview, image_path: Path) -> None:
 
 #entry point
 
-def main() -> int:
-    args = parse_args()
-
-    #input image is always in input-images/
-    input_path = (DEFAULT_INPUT_DIR / args.input_image).resolve()
+def run(
+    input_image: str,
+    csv_dir: Path | None = None,
+    preview_dir: Path | None = None,
+    no_show: bool = False,
+) -> Path:
+    """Run the full contour-extraction pipeline and return the CSV path."""
+    input_path = (DEFAULT_INPUT_DIR / input_image).resolve()
     if not input_path.is_file():
         raise FileNotFoundError(f"Image not found: {input_path}")
 
@@ -399,31 +402,26 @@ def main() -> int:
     if image is None:
         raise RuntimeError(f"OpenCV could not load the image: {input_path}")
 
-    #resolve output directories (--output-dir overrides both)
-    override = args.output_dir
-    csv_dir = resolve_output_dir(override or args.csv_dir, DEFAULT_CSV_DIR)
-    preview_dir = resolve_output_dir(override or args.preview_dir, DEFAULT_PREVIEW_DIR)
+    csv_out = resolve_output_dir(csv_dir, DEFAULT_CSV_DIR)
+    preview_out = resolve_output_dir(preview_dir, DEFAULT_PREVIEW_DIR)
 
-    csv_path = csv_dir / f"{input_path.stem}_contour.csv"
-    preview_path = preview_dir / f"{input_path.stem}_preview.png"
+    csv_path = csv_out / f"{input_path.stem}_contour.csv"
+    preview_path = preview_out / f"{input_path.stem}_preview.png"
 
-    #load baseline front 60% from NACA 2412 theta=0
     if not DEFAULT_BASELINE.is_file():
         raise FileNotFoundError(f"Baseline CSV not found: {DEFAULT_BASELINE}")
     front = load_baseline_front(DEFAULT_BASELINE)
 
-    #core pipeline: mask, surface curves, preview overlay
     mask = build_primary_mask(image)
     xs, top_curve, bottom_curve = extract_surface_curves(mask)
     preview = make_preview(image, xs, top_curve, bottom_curve)
 
-    #normalize extracted trailing 40% and splice with fixed front 60%
     rear_x, rear_upper_y, rear_lower_y = normalize_trailing_section(
         xs, top_curve, bottom_curve, front,
     )
     selig_x, selig_y = splice_airfoil(front, rear_x, rear_upper_y, rear_lower_y)
     write_csv(selig_x, selig_y, csv_path)
-    preview_dir.mkdir(parents=True, exist_ok=True)
+    preview_out.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(preview_path), preview)
 
     print(f"Input image: {input_path}")
@@ -431,9 +429,21 @@ def main() -> int:
     print(f"Preview image: {preview_path}")
     print(f"Curve samples written: {len(selig_x)}")
 
-    if not args.no_show:
+    if not no_show:
         show_preview(preview, input_path)
 
+    return csv_path
+
+
+def main() -> int:
+    args = parse_args()
+    override = args.output_dir
+    run(
+        input_image=args.input_image,
+        csv_dir=override or args.csv_dir,
+        preview_dir=override or args.preview_dir,
+        no_show=args.no_show,
+    )
     return 0
 
 

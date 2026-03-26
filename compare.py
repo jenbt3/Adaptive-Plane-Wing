@@ -162,54 +162,42 @@ def compare_rear_batch(
     return np.sqrt(mse)
 
 
-#Main
+#Core API
 
-def main() -> int:
-    args = parse_args()
+def run(
+    image_csv: str | Path,
+    base_dir: str | Path | None = None,
+    top: int = 3,
+    n_points: int = 100,
+) -> list[dict]:
+    """Compare an image-extracted airfoil CSV against all base airfoils.
 
-    image_path = Path(args.image_csv)
-    base_dir = Path(args.base_dir)
+    Returns a list of dicts (sorted by rear RMSE) with keys:
+        rank, name, theta, rear_rmse, full_rmse, upper_rmse, lower_rmse
+    """
+    image_path = Path(image_csv)
+    base_path = Path(base_dir) if base_dir is not None else DEFAULT_BASE_DIR
 
     if not image_path.is_file():
-        print(f"Error: image CSV not found: {image_path}", file=sys.stderr)
-        return 1
-    if not base_dir.is_dir():
-        print(f"Error: base airfoil directory not found: {base_dir}", file=sys.stderr)
-        return 1
-    if args.n_points < 2:
-        print("Error: --n-points must be at least 2", file=sys.stderr)
-        return 1
-    if args.top < 1:
-        print("Error: --top must be at least 1", file=sys.stderr)
-        return 1
+        raise FileNotFoundError(f"Image CSV not found: {image_path}")
+    if not base_path.is_dir():
+        raise FileNotFoundError(f"Base airfoil directory not found: {base_path}")
+    if n_points < 2:
+        raise ValueError("n_points must be at least 2")
+    if top < 1:
+        raise ValueError("top must be at least 1")
 
-    #discover base airfoils
-    bases = discover_base_airfoils(base_dir)
+    bases = discover_base_airfoils(base_path)
     if not bases:
-        print(f"Error: no base airfoil CSVs found in {base_dir}", file=sys.stderr)
-        return 1
+        raise FileNotFoundError(f"No base airfoil CSVs found in {base_path}")
 
-    #load image airfoil
-    try:
-        image_data = load_selig_csv(image_path)
-    except ValueError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
-
-    #build rear-section index and compare in batch
-    try:
-        matrix, grid, x_max = build_rear_index(bases, HINGE_X, args.n_points)
-    except ValueError as exc:
-        print(f"Error loading base airfoils: {exc}", file=sys.stderr)
-        return 1
-
+    image_data = load_selig_csv(image_path)
+    matrix, grid, x_max = build_rear_index(bases, HINGE_X, n_points)
     rmse_all = compare_rear_batch(image_data, matrix, grid)
 
-    #rank and pick top N
-    top_n = min(args.top, len(bases))
+    top_n = min(top, len(bases))
     ranked_idx = np.argsort(rmse_all)[:top_n]
 
-    #refinement: full-airfoil comparison on top matches only
     results = []
     for rank, idx in enumerate(ranked_idx, 1):
         theta, path = bases[idx]
@@ -226,10 +214,15 @@ def main() -> int:
             "lower_rmse": full["lower_rmse"],
         })
 
-    #output
-    print(f"Image   : {image_path.name}")
-    print(f"Bases   : {len(bases)} airfoils in {base_dir.name}/")
-    print(f"Grid    : {args.n_points} pts on rear section (x = {HINGE_X:.1f} .. {x_max:.4f})")
+    return results
+
+
+def print_results(results: list[dict], image_name: str, n_bases: int,
+                  base_dir_name: str, n_points: int, x_max: float) -> None:
+    """Print the comparison results table to stdout."""
+    print(f"Image   : {image_name}")
+    print(f"Bases   : {n_bases} airfoils in {base_dir_name}/")
+    print(f"Grid    : {n_points} pts on rear section (x = {HINGE_X:.1f} .. {x_max:.4f})")
     print()
     print(f"{'Rank':<6}{'Theta':>6}  {'Rear RMSE':>12}  {'Full RMSE':>12}  {'Upper RMSE':>12}  {'Lower RMSE':>12}  Name")
     print("-" * 90)
@@ -241,6 +234,30 @@ def main() -> int:
             f"{r['name']}"
         )
 
+
+#Main
+
+def main() -> int:
+    args = parse_args()
+
+    image_path = Path(args.image_csv)
+    base_dir = Path(args.base_dir)
+
+    try:
+        results = run(
+            image_csv=image_path,
+            base_dir=base_dir,
+            top=args.top,
+            n_points=args.n_points,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    bases = discover_base_airfoils(base_dir)
+    _, _, x_max = build_rear_index(bases, HINGE_X, args.n_points)
+    print_results(results, image_path.name, len(bases),
+                  base_dir.name, args.n_points, x_max)
     return 0
 
 
