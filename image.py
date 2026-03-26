@@ -6,11 +6,13 @@ import cv2
 import numpy as np
 from numpy.polynomial import Chebyshev
 
+from load_airfoil_csv import PROJECT_ROOT, HINGE_X, load_selig_csv
+
 #project directory layout
-PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_INPUT_DIR = PROJECT_ROOT / "input-images"
 DEFAULT_CSV_DIR = PROJECT_ROOT / "output-csv"
 DEFAULT_PREVIEW_DIR = PROJECT_ROOT / "preview-images"
+DEFAULT_BASELINE = PROJECT_ROOT / "base-airfoils" / "NACA 2412 theta = 0.csv"
 
 
 #cli argument parsing
@@ -163,61 +165,193 @@ def extract_surface_curves(mask):
 
     #find topmost and bottommost mask pixel per column
     cols = mask[:, xs] > 0
-    top = np.argmax(cols, axis=0).astype(int)
-    bottom = (h - 1 - np.argmax(cols[::-1], axis=0)).astype(int)
+    assert cols.any(axis=0).all(), "Mask column with no True pixels after filtering"
+    raw_top = np.argmax(cols, axis=0).astype(int)
+    raw_bottom = (h - 1 - np.argmax(cols[::-1], axis=0)).astype(int)
 
     #smooth raw edges then fit chebyshev polynomials
     envelope_window = max(81, (w // 14) | 1)  #odd-sized kernel, >=81 px
     top_curve = fit_surface_curve(
-        xs, smooth_curve(top, envelope_window, cv2.MORPH_OPEN), "top", degree=6,
+        xs, smooth_curve(raw_top, envelope_window, cv2.MORPH_OPEN), "top", degree=6,
     )
     bottom_curve = fit_surface_curve(
-        xs, smooth_curve(bottom, envelope_window, cv2.MORPH_CLOSE), "bottom", degree=5,
+        xs, smooth_curve(raw_bottom, envelope_window, cv2.MORPH_CLOSE), "bottom", degree=5,
     )
 
-    #clamp to image bounds, ensure bottom is always below top
+    #clamp to image bounds
     top_curve = np.clip(top_curve, 0, h - 1)
     bottom_curve = np.clip(bottom_curve, 0, h - 1)
-    bottom_curve = np.maximum(bottom_curve, top_curve + 1)
+
+    #detect trailing edge (thinner end) from raw mask data
+    raw_thickness = (raw_bottom - raw_top).astype(float)
+    n_sample = max(1, len(xs) // 20)
+    te_on_right = raw_thickness[:n_sample].mean() >= raw_thickness[-n_sample:].mean()
+
+    #blend fitted curves toward raw edge data near trailing edge so they converge
+    blend_len = max(3, len(xs) // 10)
+    if te_on_right:
+        start = len(xs) - blend_len
+        alpha = np.linspace(0, 1, blend_len)
+        top_curve[start:] = np.round(
+            top_curve[start:] * (1 - alpha) + raw_top[start:] * alpha
+        ).astype(int)
+        bottom_curve[start:] = np.round(
+            bottom_curve[start:] * (1 - alpha) + raw_bottom[start:] * alpha
+        ).astype(int)
+    else:
+        alpha = np.linspace(1, 0, blend_len)
+        top_curve[:blend_len] = np.round(
+            top_curve[:blend_len] * (1 - alpha) + raw_top[:blend_len] * alpha
+        ).astype(int)
+        bottom_curve[:blend_len] = np.round(
+            bottom_curve[:blend_len] * (1 - alpha) + raw_bottom[:blend_len] * alpha
+        ).astype(int)
+
+    #ensure bottom >= top (allow equality at trailing edge for convergence)
+    bottom_curve = np.maximum(bottom_curve, top_curve)
+    top_curve = np.clip(top_curve, 0, h - 1)
+    bottom_curve = np.clip(bottom_curve, 0, h - 1)
 
     return xs, top_curve, bottom_curve
 
 
-#output helpers
+#baseline loading
 
-#normalize pixel surfaces to chord=1 and arrange in selig order (TE→LE upper, LE→TE lower)
-def normalize_to_selig(xs, top_curve, bottom_curve):
-    x = xs.astype(float)
-    top = top_curve.astype(float)
-    bot = bottom_curve.astype(float)
+def load_baseline_front(path: Path, hinge_x: float = HINGE_X) -> dict:
+    """Load the NACA 2412 theta=0 baseline and clip to x <= hinge_x.
 
-    x_min, x_max = x.min(), x.max()
-    chord = x_max - x_min
-    if chord == 0:
-        raise RuntimeError("Extracted airfoil has zero chord length.")
+    Returns front-section upper/lower arrays (ascending x, clipped at hinge_x)
+    plus interpolated y-values exactly at the hinge.
+    """
+    base = load_selig_csv(path)
 
-    x_norm = (x - x_min) / chord
+    #interpolate surface y-values at exactly hinge_x
+    upper_y_at_hinge = float(np.interp(hinge_x, base["upper_x"], base["upper_y"]))
+    lower_y_at_hinge = float(np.interp(hinge_x, base["lower_x"], base["lower_y"]))
 
-    #y-reference: camber midpoint at trailing edge (max x)
-    te_idx = int(np.argmax(x_norm))
-    y_ref = (top[te_idx] + bot[te_idx]) / 2.0
+    #clip upper surface to x <= hinge_x, append the hinge point
+    mask_u = base["upper_x"] <= hinge_x
+    front_upper_x = np.append(base["upper_x"][mask_u], hinge_x)
+    front_upper_y = np.append(base["upper_y"][mask_u], upper_y_at_hinge)
 
-    #negate to flip pixel-y (down) → aero-y (up), normalize by chord
-    upper_y = -(top - y_ref) / chord
-    lower_y = -(bot - y_ref) / chord
+    #clip lower surface to x <= hinge_x, append the hinge point
+    mask_l = base["lower_x"] <= hinge_x
+    front_lower_x = np.append(base["lower_x"][mask_l], hinge_x)
+    front_lower_y = np.append(base["lower_y"][mask_l], lower_y_at_hinge)
 
-    #sort ascending in x for splitting
-    order = np.argsort(x_norm)
-    x_sorted = x_norm[order]
-    upper_sorted = upper_y[order]
-    lower_sorted = lower_y[order]
+    return {
+        "upper_x": front_upper_x, "upper_y": front_upper_y,
+        "lower_x": front_lower_x, "lower_y": front_lower_y,
+        "upper_y_at_hinge": upper_y_at_hinge,
+        "lower_y_at_hinge": lower_y_at_hinge,
+    }
 
-    #selig order: upper surface TE→LE (x descending), then lower LE→TE (x ascending)
-    #skip first point of lower surface to avoid duplicating the leading edge
-    selig_x = np.concatenate([x_sorted[::-1], x_sorted[1:]])
-    selig_y = np.concatenate([upper_sorted[::-1], lower_sorted[1:]])
+
+#trailing-section normalization
+
+def detect_orientation(xs, top_curve, bottom_curve):
+    """Determine which pixel end is the hinge (thicker) vs trailing edge (thinner).
+
+    Returns (hinge_pixel_x, hinge_side) where hinge_side is 'left' or 'right'.
+    """
+    thickness = (bottom_curve - top_curve).astype(float)
+
+    #average thickness over the first and last 5% of columns
+    n = max(1, len(xs) // 20)
+    left_thickness = thickness[:n].mean()
+    right_thickness = thickness[-n:].mean()
+
+    if left_thickness >= right_thickness:
+        #left end is thicker → hinge is at pixel x_min
+        return xs[0], "left"
+    else:
+        #right end is thicker → hinge is at pixel x_max
+        return xs[-1], "right"
+
+
+def normalize_trailing_section(xs, top_curve, bottom_curve, front):
+    """Map extracted pixel curves of the trailing 40% to normalized airfoil coordinates.
+
+    Uses the baseline front's hinge-point thickness to calibrate the pixel→chord scale.
+    Returns (rear_x, rear_upper_y, rear_lower_y) sorted ascending in x, for x >= HINGE_X.
+    """
+    hinge_pixel_x, hinge_side = detect_orientation(xs, top_curve, bottom_curve)
+
+    #pixel thickness at the hinge end (average over nearest 5% of columns)
+    thickness_px = (bottom_curve - top_curve).astype(float)
+    n = max(1, len(xs) // 20)
+    if hinge_side == "left":
+        hinge_thickness_px = thickness_px[:n].mean()
+        hinge_top_px = float(top_curve[:n].mean())
+        hinge_bot_px = float(bottom_curve[:n].mean())
+    else:
+        hinge_thickness_px = thickness_px[-n:].mean()
+        hinge_top_px = float(top_curve[-n:].mean())
+        hinge_bot_px = float(bottom_curve[-n:].mean())
+
+    #baseline thickness at hinge in normalized chord units
+    baseline_thickness = front["upper_y_at_hinge"] - front["lower_y_at_hinge"]
+    if baseline_thickness <= 0 or hinge_thickness_px <= 0:
+        raise RuntimeError("Cannot calibrate scale: zero thickness at hinge.")
+
+    pixels_per_unit = hinge_thickness_px / baseline_thickness
+
+    #pixel camber midpoint at hinge, and baseline camber at hinge
+    camber_px = (hinge_top_px + hinge_bot_px) / 2.0
+    camber_base = (front["upper_y_at_hinge"] + front["lower_y_at_hinge"]) / 2.0
+
+    #x mapping: pixel offset from hinge → normalized chord
+    px = xs.astype(float)
+    if hinge_side == "left":
+        #hinge is at left (min pixel x), TE is at right (max pixel x)
+        rear_x = HINGE_X + (px - hinge_pixel_x) / pixels_per_unit
+    else:
+        #hinge is at right (max pixel x), TE is at left (min pixel x)
+        rear_x = HINGE_X - (px - hinge_pixel_x) / pixels_per_unit
+
+    #y mapping: negate pixel-y (down=positive) → aero-y (up=positive)
+    top_f = top_curve.astype(float)
+    bot_f = bottom_curve.astype(float)
+    rear_upper_y = camber_base - (top_f - camber_px) / pixels_per_unit
+    rear_lower_y = camber_base - (bot_f - camber_px) / pixels_per_unit
+
+    #sort ascending in x
+    order = np.argsort(rear_x)
+    rear_x = rear_x[order]
+    rear_upper_y = rear_upper_y[order]
+    rear_lower_y = rear_lower_y[order]
+
+    #clip to x >= HINGE_X (discard any pixels that mapped before the hinge)
+    valid = rear_x >= HINGE_X
+    return rear_x[valid], rear_upper_y[valid], rear_lower_y[valid]
+
+
+def splice_airfoil(front, rear_x, rear_upper_y, rear_lower_y):
+    """Combine the fixed front 60% (from baseline) with the extracted rear 40%.
+
+    Returns (selig_x, selig_y) in Selig order: upper TE→LE, lower LE→TE.
+    """
+    #front surfaces already end at hinge_x; rear starts at hinge_x
+    #skip first rear point if it duplicates the hinge x
+    rear_start = 1 if len(rear_x) > 1 and np.isclose(rear_x[0], front["upper_x"][-1], atol=1e-6) else 0
+
+    #upper surface: front ascending x + rear ascending x
+    full_upper_x = np.concatenate([front["upper_x"], rear_x[rear_start:]])
+    full_upper_y = np.concatenate([front["upper_y"], rear_upper_y[rear_start:]])
+
+    #lower surface: front ascending x + rear ascending x
+    full_lower_x = np.concatenate([front["lower_x"], rear_x[rear_start:]])
+    full_lower_y = np.concatenate([front["lower_y"], rear_lower_y[rear_start:]])
+
+    #selig order: upper TE→LE (x descending), then lower LE→TE (x ascending)
+    #skip first lower point to avoid duplicating leading edge
+    selig_x = np.concatenate([full_upper_x[::-1], full_lower_x[1:]])
+    selig_y = np.concatenate([full_upper_y[::-1], full_lower_y[1:]])
 
     return selig_x, selig_y
+
+
+#output helpers
 
 
 #write normalized airfoil data to csv in selig format (x, y)
@@ -273,13 +407,21 @@ def main() -> int:
     csv_path = csv_dir / f"{input_path.stem}_contour.csv"
     preview_path = preview_dir / f"{input_path.stem}_preview.png"
 
+    #load baseline front 60% from NACA 2412 theta=0
+    if not DEFAULT_BASELINE.is_file():
+        raise FileNotFoundError(f"Baseline CSV not found: {DEFAULT_BASELINE}")
+    front = load_baseline_front(DEFAULT_BASELINE)
+
     #core pipeline: mask, surface curves, preview overlay
     mask = build_primary_mask(image)
     xs, top_curve, bottom_curve = extract_surface_curves(mask)
     preview = make_preview(image, xs, top_curve, bottom_curve)
 
-    #normalize to chord=1 selig format and write
-    selig_x, selig_y = normalize_to_selig(xs, top_curve, bottom_curve)
+    #normalize extracted trailing 40% and splice with fixed front 60%
+    rear_x, rear_upper_y, rear_lower_y = normalize_trailing_section(
+        xs, top_curve, bottom_curve, front,
+    )
+    selig_x, selig_y = splice_airfoil(front, rear_x, rear_upper_y, rear_lower_y)
     write_csv(selig_x, selig_y, csv_path)
     preview_dir.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(preview_path), preview)
