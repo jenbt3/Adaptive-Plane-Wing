@@ -3,17 +3,20 @@
 #include <Wire.h> //I2C library for MPU6050
 #include <Adafruit_Sensor.h>
 #include <Adafruit_MPU6050.h>
+#include <LiquidCrystal_I2C.h>
 #include "camber_position.h"
 
+
 // Pinout constants
-const int SERVO_PINS[] = {15, 16, 17, 19, 20, 21};  //1, 2, 3, 4, 5, 6 respectively
+const int SERVO_PINS[] = {15, 16, 17, 18, 8, 3};  //1, 2, 3, 4, 5, 6 respectively
 const int NUM_SERVOS   = sizeof(SERVO_PINS) / sizeof(SERVO_PINS[0]);
-const int SDA_PIN      = 4;
-const int SCL_PIN      = 5;
+const int SDA_PIN      = 5;
+const int SCL_PIN      = 4;
 
 // Servo constants
 const int NEUTRAL_POS  = 90;
 const int MAX_HERTZ    = 50;
+
 
 const int SERVO_TRIMS[] = { 
     0,
@@ -36,6 +39,7 @@ Adafruit_MPU6050 mpu;
 float pitch             = 0.0;
 float calibrationOffset = 0.0;
 unsigned long lastTime  = 0;
+float overallOffset = 30.0;
 
 void setup() {
   Serial.begin(115200); //start serial for debugging
@@ -131,17 +135,17 @@ void loop() {
   float accelPitch = atan2(a.acceleration.x, a.acceleration.y)
                      * 180.0 / M_PI - calibrationOffset;
 
-  pitch = ALPHA * (pitch + g.gyro.z * dt * 180.0 / M_PI) + (1.0 - ALPHA) * accelPitch;
+  pitch = ALPHA * (pitch + g.gyro.z * dt * 180.0/ M_PI) + (1.0 - ALPHA) * accelPitch;
 
   int rawPosition    = getServoPosition(pitch);
-  int targetPosition = rawPosition + NEUTRAL_POS;
+  int targetPosition = rawPosition + NEUTRAL_POS + overallOffset;
 
   writeAllServos(targetPosition);
 
   Serial.print("AoA: ");
   Serial.print(pitch, 2);
   Serial.print(" deg  |  Servo: ");
-  Serial.println(targetPosition);
+  Serial.println(targetPosition - overallOffset, 2);
 
   delay(10);
 }
