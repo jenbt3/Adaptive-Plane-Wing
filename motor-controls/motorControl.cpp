@@ -3,7 +3,6 @@
 #include <Wire.h> //I2C library for MPU6050
 #include <Adafruit_Sensor.h>
 #include <Adafruit_MPU6050.h>
-#include <LiquidCrystal_I2C.h>
 #include "camber_position.h"
 
 
@@ -39,7 +38,7 @@ Adafruit_MPU6050 mpu;
 float pitch             = 0.0;
 float calibrationOffset = 0.0;
 unsigned long lastTime  = 0;
-float overallOffset = 30.0;
+float overallOffset = 0.0;
 
 void setup() {
   Serial.begin(115200); //start serial for debugging
@@ -90,6 +89,7 @@ void setup() {
     Serial.print(") trim: ");
     Serial.println(SERVO_TRIMS[i]);
   }
+  
 
   lastTime = millis();
 }
