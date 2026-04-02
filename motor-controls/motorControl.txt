@@ -39,7 +39,7 @@ float pitch             = 0.0;
 float calibrationOffset = 0.0;
 unsigned long lastTime  = 0;
 
-float overallOffset = 20.0;
+float overallOffset = 30.0;
 
 void setup() {
   Serial.begin(115200); //start serial for debugging
@@ -95,6 +95,7 @@ void setup() {
   lastTime = millis();
 }
 
+/*
 int getServoPosition(float angle) {
   int roundedAngle = (int)round(angle);
   for (int i = 0; i < NUM_SHAPES; i++) {
@@ -112,6 +113,27 @@ int getServoPosition(float angle) {
     
   return 0;
 }
+*/
+
+int getServoPosition(float angle) {
+  //interpolates between two closest points
+  for (int i = 0; i < NUM_SHAPES - 1; i++) {
+    if (angle >= lookupTable[i].angleOfAttack && angle < lookupTable[i+1].angleOfAttack) {
+      float t = (angle - lookupTable[i].angleOfAttack) / (lookupTable[i+1].angleOfAttack - lookupTable[i].angleOfAttack);
+      return (int)round(lookupTable[i].servoPosition + t * (lookupTable[i+1].servoPosition - lookupTable[i].servoPosition));
+    }
+  }
+
+  //table bounds
+  if (angle <= lookupTable[0].angleOfAttack)
+    return lookupTable[0].servoPosition;
+  if (angle >= lookupTable[NUM_SHAPES - 1].angleOfAttack)
+    return lookupTable[NUM_SHAPES - 1].servoPosition;
+
+
+  return lookupTable[0].servoPosition;
+}
+
 
 //write the same position to all servos
 void writeAllServos(int position) {
