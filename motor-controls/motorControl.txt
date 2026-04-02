@@ -38,7 +38,8 @@ Adafruit_MPU6050 mpu;
 float pitch             = 0.0;
 float calibrationOffset = 0.0;
 unsigned long lastTime  = 0;
-float overallOffset = 0.0;
+
+float overallOffset = 20.0;
 
 void setup() {
   Serial.begin(115200); //start serial for debugging
@@ -132,8 +133,7 @@ void loop() {
   float dt = (now - lastTime) / 1000.0;
   lastTime = now;
 
-  float accelPitch = atan2(a.acceleration.x, a.acceleration.y)
-                     * 180.0 / M_PI - calibrationOffset;
+  float accelPitch = atan2(a.acceleration.x, a.acceleration.y) * 180.0 / M_PI - calibrationOffset;
 
   pitch = ALPHA * (pitch + g.gyro.z * dt * 180.0/ M_PI) + (1.0 - ALPHA) * accelPitch;
 
