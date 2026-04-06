@@ -1,84 +1,38 @@
 import argparse
-import csv
+import re
 import sys
 from pathlib import Path
 
 import numpy as np
+
+from load_airfoil_csv import PROJECT_ROOT, HINGE_X, load_selig_csv
+
+DEFAULT_BASE_DIR = PROJECT_ROOT / "base-airfoils"
 
 
 #CLI
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Compare an image-extracted airfoil CSV against a base airfoil CSV "
-                    "using least-squares residuals."
+        description="Find the closest base airfoils to an image-extracted airfoil CSV."
     )
     parser.add_argument(
         "image_csv",
         help="Path to the CSV produced by image.py (normalized Selig format).",
     )
     parser.add_argument(
-        "base_csv",
-        help="Path to the base airfoil CSV (normalized Selig format).",
+        "--base-dir", type=Path, default=DEFAULT_BASE_DIR,
+        help="Directory containing base airfoil CSVs (default: base-airfoils/).",
     )
     parser.add_argument(
-        "--n-points", type=int, default=200,
-        help="Number of interpolation points on the common x-grid (default: 200).",
+        "--top", type=int, default=3,
+        help="Number of top matches to return (default: 3).",
+    )
+    parser.add_argument(
+        "--n-points", type=int, default=100,
+        help="Number of interpolation points on the rear x-grid (default: 100).",
     )
     return parser.parse_args()
-
-
-#Loader
-
-def load_airfoil_csv(path: Path) -> dict:
-    """Load a Selig-format airfoil CSV (x,y with header).
-
-    Splits at the leading edge (minimum x) into upper and lower surfaces.
-    Returns dict with upper_x, upper_y, lower_x, lower_y (all ascending in x).
-    """
-    with path.open(newline="", encoding="utf-8") as f:
-        reader = csv.reader(f)
-        try:
-            next(reader)  #skip header
-        except StopIteration:
-            raise ValueError(f"CSV file is empty: {path}")
-        try:
-            rows = [list(map(float, row)) for row in reader]
-        except ValueError as exc:
-            raise ValueError(f"Non-numeric data in CSV {path}: {exc}")
-
-    if not rows:
-        raise ValueError(f"CSV file contains no data rows: {path}")
-
-    data = np.array(rows)
-    if not np.all(np.isfinite(data)):
-        raise ValueError(f"CSV contains NaN or Inf values: {path}")
-
-    x_all = data[:, 0]
-    y_all = data[:, 1]
-
-    le_idx = int(np.argmin(x_all))  #leading-edge row
-
-    if le_idx < 1 or le_idx >= len(x_all) - 1:
-        raise ValueError(
-            f"Leading edge at boundary (idx={le_idx}, n={len(x_all)}) — "
-            f"cannot split into upper/lower surfaces: {path}"
-        )
-
-    #upper surface: TE → LE (reverse so x is ascending)
-    upper_x = x_all[: le_idx + 1][::-1]
-    upper_y = y_all[: le_idx + 1][::-1]
-
-    #lower surface: LE → TE (already ascending in x)
-    lower_x = x_all[le_idx:]
-    lower_y = y_all[le_idx:]
-
-    return {
-        "upper_x": upper_x,
-        "upper_y": upper_y,
-        "lower_x": lower_x,
-        "lower_y": lower_y,
-    }
 
 
 #Comparison
@@ -117,43 +71,193 @@ def least_squares_compare(image_norm: dict, base: dict, n_points: int) -> dict:
     }
 
 
+#Discovery
+
+THETA_RE = re.compile(r"theta\s*=?\s*(-?\d+)")
+
+
+def parse_theta(filename: str) -> int | None:
+    """Extract theta integer from a base-airfoil filename."""
+    m = THETA_RE.search(filename)
+    return int(m.group(1)) if m else None
+
+
+def discover_base_airfoils(base_dir: Path) -> list[tuple[int, Path]]:
+    """Scan base-dir for airfoil CSVs, deduplicate by theta, return sorted list."""
+    seen: dict[int, Path] = {}
+    for p in sorted(base_dir.glob("*.csv")):
+        theta = parse_theta(p.stem)
+        if theta is None:
+            continue
+        #prefer filenames with "=" for consistency; keep first seen otherwise
+        if theta not in seen or "=" in p.stem:
+            seen[theta] = p
+    return sorted(seen.items())
+
+
+#Batch rear-section indexing
+
+def extract_rear(airfoil: dict, hinge_x: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Extract the rear section (x >= hinge_x) from an airfoil dict."""
+    u_mask = airfoil["upper_x"] >= hinge_x
+    l_mask = airfoil["lower_x"] >= hinge_x
+    if not u_mask.any() or not l_mask.any():
+        raise ValueError(
+            f"No points at or beyond hinge x={hinge_x} — "
+            f"upper x-range [{airfoil['upper_x'].min():.4f}, {airfoil['upper_x'].max():.4f}], "
+            f"lower x-range [{airfoil['lower_x'].min():.4f}, {airfoil['lower_x'].max():.4f}]"
+        )
+    return (
+        airfoil["upper_x"][u_mask], airfoil["upper_y"][u_mask],
+        airfoil["lower_x"][l_mask], airfoil["lower_y"][l_mask],
+    )
+
+
+def build_rear_index(
+    bases: list[tuple[int, Path]], hinge_x: float, n_grid: int,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Load all base airfoils, interpolate rear sections onto a shared grid.
+
+    Returns (matrix, grid, x_max) where matrix has shape (N_bases, 2*n_grid)
+    with upper then lower y-values concatenated per row.
+    """
+    #first pass: find the smallest common x-max across all bases
+    rears = []
+    for _, path in bases:
+        airfoil = load_selig_csv(path)
+        rear = extract_rear(airfoil, hinge_x)
+        rears.append(rear)
+
+    x_max = min(
+        min(r[0].max(), r[2].max()) for r in rears
+    )
+    grid = np.linspace(hinge_x, x_max, n_grid)
+
+    #second pass: interpolate each rear onto the shared grid, stack into matrix
+    rows = []
+    for ru_x, ru_y, rl_x, rl_y in rears:
+        upper_interp = np.interp(grid, ru_x, ru_y)
+        lower_interp = np.interp(grid, rl_x, rl_y)
+        rows.append(np.concatenate([upper_interp, lower_interp]))
+
+    return np.array(rows), grid, x_max
+
+
+#Vectorized batch comparison
+
+def compare_rear_batch(
+    image_data: dict, matrix: np.ndarray, grid: np.ndarray,
+) -> np.ndarray:
+    """Compute RMSE of image rear section against all base rears simultaneously."""
+    ru_x, ru_y, rl_x, rl_y = extract_rear(image_data, HINGE_X)
+    n_grid = len(grid)
+
+    img_upper = np.interp(grid, ru_x, ru_y)
+    img_lower = np.interp(grid, rl_x, rl_y)
+    img_vec = np.concatenate([img_upper, img_lower])
+
+    #broadcast: (N_bases, 2*n_grid) - (2*n_grid,) → squared differences
+    diff_sq = (matrix - img_vec) ** 2
+    mse = diff_sq.mean(axis=1)
+    return np.sqrt(mse)
+
+
+#Core API
+
+def run(
+    image_csv: str | Path,
+    base_dir: str | Path | None = None,
+    top: int = 3,
+    n_points: int = 100,
+) -> list[dict]:
+    """Compare an image-extracted airfoil CSV against all base airfoils.
+
+    Returns a list of dicts (sorted by rear RMSE) with keys:
+        rank, name, theta, rear_rmse, full_rmse, upper_rmse, lower_rmse
+    """
+    image_path = Path(image_csv)
+    base_path = Path(base_dir) if base_dir is not None else DEFAULT_BASE_DIR
+
+    if not image_path.is_file():
+        raise FileNotFoundError(f"Image CSV not found: {image_path}")
+    if not base_path.is_dir():
+        raise FileNotFoundError(f"Base airfoil directory not found: {base_path}")
+    if n_points < 2:
+        raise ValueError("n_points must be at least 2")
+    if top < 1:
+        raise ValueError("top must be at least 1")
+
+    bases = discover_base_airfoils(base_path)
+    if not bases:
+        raise FileNotFoundError(f"No base airfoil CSVs found in {base_path}")
+
+    image_data = load_selig_csv(image_path)
+    matrix, grid, x_max = build_rear_index(bases, HINGE_X, n_points)
+    rmse_all = compare_rear_batch(image_data, matrix, grid)
+
+    top_n = min(top, len(bases))
+    ranked_idx = np.argsort(rmse_all)[:top_n]
+
+    results = []
+    for rank, idx in enumerate(ranked_idx, 1):
+        theta, path = bases[idx]
+        rear_rmse = float(rmse_all[idx])
+        base_data = load_selig_csv(path)
+        full = least_squares_compare(image_data, base_data, 200)
+        results.append({
+            "rank": rank,
+            "name": path.stem,
+            "theta": theta,
+            "rear_rmse": rear_rmse,
+            "full_rmse": full["rmse"],
+            "upper_rmse": full["upper_rmse"],
+            "lower_rmse": full["lower_rmse"],
+        })
+
+    return results
+
+
+def print_results(results: list[dict], image_name: str, n_bases: int,
+                  base_dir_name: str, n_points: int, x_max: float) -> None:
+    """Print the comparison results table to stdout."""
+    print(f"Image   : {image_name}")
+    print(f"Bases   : {n_bases} airfoils in {base_dir_name}/")
+    print(f"Grid    : {n_points} pts on rear section (x = {HINGE_X:.1f} .. {x_max:.4f})")
+    print()
+    print(f"{'Rank':<6}{'Theta':>6}  {'Rear RMSE':>12}  {'Full RMSE':>12}  {'Upper RMSE':>12}  {'Lower RMSE':>12}  Name")
+    print("-" * 90)
+    for r in results:
+        print(
+            f"{r['rank']:<6}{r['theta']:>6}°  "
+            f"{r['rear_rmse']:>12.7f}  {r['full_rmse']:>12.7f}  "
+            f"{r['upper_rmse']:>12.7f}  {r['lower_rmse']:>12.7f}  "
+            f"{r['name']}"
+        )
+
+
 #Main
 
 def main() -> int:
     args = parse_args()
 
     image_path = Path(args.image_csv)
-    base_path = Path(args.base_csv)
+    base_dir = Path(args.base_dir)
 
-    if not image_path.is_file():
-        print(f"Error: image CSV not found: {image_path}", file=sys.stderr)
-        return 1
-    if not base_path.is_file():
-        print(f"Error: base airfoil CSV not found: {base_path}", file=sys.stderr)
-        return 1
-    if args.n_points < 2:
-        print("Error: --n-points must be at least 2", file=sys.stderr)
-        return 1
-
-    #load both as selig-format CSVs
     try:
-        image_data = load_airfoil_csv(image_path)
-        base_data = load_airfoil_csv(base_path)
-    except ValueError as exc:
+        results = run(
+            image_csv=image_path,
+            base_dir=base_dir,
+            top=args.top,
+            n_points=args.n_points,
+        )
+    except (FileNotFoundError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
-    #compare
-    result = least_squares_compare(image_data, base_data, args.n_points)
-
-    #output
-    print(f"Base airfoil : {base_path.stem}")
-    print(f"RMSE (total) : {result['rmse']:.6f}")
-    print(f"RMSE (upper) : {result['upper_rmse']:.6f}")
-    print(f"RMSE (lower) : {result['lower_rmse']:.6f}")
-    print(f"MSE          : {result['mse']:.8f}")
-    print(f"Grid points  : {result['n_points']}")
-
+    bases = discover_base_airfoils(base_dir)
+    _, _, x_max = build_rear_index(bases, HINGE_X, args.n_points)
+    print_results(results, image_path.name, len(bases),
+                  base_dir.name, args.n_points, x_max)
     return 0
 
 
