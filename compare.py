@@ -147,8 +147,11 @@ def build_rear_index(
 
 def compare_rear_batch(
     image_data: dict, matrix: np.ndarray, grid: np.ndarray,
-) -> np.ndarray:
-    """Compute RMSE of image rear section against all base rears simultaneously."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Compute RMSE of image rear section against all base rears simultaneously.
+
+    Returns (rear_rmse, upper_rmse, lower_rmse) arrays, each of length N_bases.
+    """
     ru_x, ru_y, rl_x, rl_y = extract_rear(image_data, HINGE_X)
     n_grid = len(grid)
 
@@ -159,7 +162,12 @@ def compare_rear_batch(
     #broadcast: (N_bases, 2*n_grid) - (2*n_grid,) → squared differences
     diff_sq = (matrix - img_vec) ** 2
     mse = diff_sq.mean(axis=1)
-    return np.sqrt(mse)
+
+    # per-surface RMSE (upper is first n_grid cols, lower is last n_grid cols)
+    upper_mse = diff_sq[:, :n_grid].mean(axis=1)
+    lower_mse = diff_sq[:, n_grid:].mean(axis=1)
+
+    return np.sqrt(mse), np.sqrt(upper_mse), np.sqrt(lower_mse)
 
 
 #Core API
@@ -173,7 +181,8 @@ def run(
     """Compare an image-extracted airfoil CSV against all base airfoils.
 
     Returns a list of dicts (sorted by rear RMSE) with keys:
-        rank, name, theta, rear_rmse, full_rmse, upper_rmse, lower_rmse
+        rank, name, theta, rear_rmse, upper_rmse, lower_rmse
+    (upper_rmse and lower_rmse are rear-section only.)
     """
     image_path = Path(image_csv)
     base_path = Path(base_dir) if base_dir is not None else DEFAULT_BASE_DIR
@@ -193,7 +202,7 @@ def run(
 
     image_data = load_selig_csv(image_path)
     matrix, grid, x_max = build_rear_index(bases, HINGE_X, n_points)
-    rmse_all = compare_rear_batch(image_data, matrix, grid)
+    rmse_all, upper_all, lower_all = compare_rear_batch(image_data, matrix, grid)
 
     top_n = min(top, len(bases))
     ranked_idx = np.argsort(rmse_all)[:top_n]
@@ -201,17 +210,13 @@ def run(
     results = []
     for rank, idx in enumerate(ranked_idx, 1):
         theta, path = bases[idx]
-        rear_rmse = float(rmse_all[idx])
-        base_data = load_selig_csv(path)
-        full = least_squares_compare(image_data, base_data, 200)
         results.append({
             "rank": rank,
             "name": path.stem,
             "theta": theta,
-            "rear_rmse": rear_rmse,
-            "full_rmse": full["rmse"],
-            "upper_rmse": full["upper_rmse"],
-            "lower_rmse": full["lower_rmse"],
+            "rear_rmse": float(rmse_all[idx]),
+            "upper_rmse": float(upper_all[idx]),
+            "lower_rmse": float(lower_all[idx]),
         })
 
     return results
@@ -224,12 +229,12 @@ def print_results(results: list[dict], image_name: str, n_bases: int,
     print(f"Bases   : {n_bases} airfoils in {base_dir_name}/")
     print(f"Grid    : {n_points} pts on rear section (x = {HINGE_X:.1f} .. {x_max:.4f})")
     print()
-    print(f"{'Rank':<6}{'Theta':>6}  {'Rear RMSE':>12}  {'Full RMSE':>12}  {'Upper RMSE':>12}  {'Lower RMSE':>12}  Name")
-    print("-" * 90)
+    print(f"{'Rank':<6}{'Theta':>6}  {'Rear RMSE':>12}  {'Upper Rear':>12}  {'Lower Rear':>12}  Name")
+    print("-" * 76)
     for r in results:
         print(
             f"{r['rank']:<6}{r['theta']:>6}°  "
-            f"{r['rear_rmse']:>12.7f}  {r['full_rmse']:>12.7f}  "
+            f"{r['rear_rmse']:>12.7f}  "
             f"{r['upper_rmse']:>12.7f}  {r['lower_rmse']:>12.7f}  "
             f"{r['name']}"
         )
