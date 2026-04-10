@@ -14,14 +14,14 @@ const int SCL_PIN      = 4;
 
 // Servo constants
 const int NEUTRAL_POS  = 90;
-const int MAX_HERTZ    = 50;
+const int MAX_HERTZ    = 50.0;
 
 
 const int SERVO_TRIMS[] = { 
-    0,
-    0,
-    0,
-    0,
+    -30,
+    10,
+    10,
+    10,
     0,
     0
 };
@@ -36,10 +36,10 @@ Adafruit_MPU6050 mpu;
 
 //global variables
 float pitch             = 0.0;
-float calibrationOffset = 0.0;
+float calibrationOffset = 10.0;
 unsigned long lastTime  = 0;
 
-float overallOffset = 30.0;
+float overallOffset = 10.0;
 
 void setup() {
   Serial.begin(115200); //start serial for debugging
@@ -95,32 +95,12 @@ void setup() {
   lastTime = millis();
 }
 
-/*
-int getServoPosition(float angle) {
-  int roundedAngle = (int)round(angle);
-  for (int i = 0; i < NUM_SHAPES; i++) {
-    if (lookupTable[i].angleOfAttack == roundedAngle) {
-      return lookupTable[i].servoPosition;
-    }
-  }
-
-  if (angle <= lookupTable[0].angleOfAttack)
-    return lookupTable[0].servoPosition;
-
-  if (angle >= lookupTable[NUM_SHAPES - 1].angleOfAttack)
-    return lookupTable[NUM_SHAPES - 1].servoPosition;
-
-    
-  return 0;
-}
-*/
-
 int getServoPosition(float angle) {
   //interpolates between two closest points
   for (int i = 0; i < NUM_SHAPES - 1; i++) {
     if (angle >= lookupTable[i].angleOfAttack && angle < lookupTable[i+1].angleOfAttack) {
       float t = (angle - lookupTable[i].angleOfAttack) / (lookupTable[i+1].angleOfAttack - lookupTable[i].angleOfAttack);
-      return (int)round(lookupTable[i].servoPosition + t * (lookupTable[i+1].servoPosition - lookupTable[i].servoPosition));
+      return (int)round(lookupTable[i].servoPosition * 2 + t * (lookupTable[i+1].servoPosition - lookupTable[i].servoPosition));
     }
   }
 
@@ -155,9 +135,10 @@ void loop() {
   float dt = (now - lastTime) / 1000.0;
   lastTime = now;
 
-  float accelPitch = atan2(a.acceleration.x, a.acceleration.y) * 180.0 / M_PI - calibrationOffset;
+  // Invert sensor sign to match AoA convention: nose-up is positive.
+  float accelPitch = -((atan2(a.acceleration.x, a.acceleration.y) * 180.0 / M_PI) - calibrationOffset);
 
-  pitch = ALPHA * (pitch + g.gyro.z * dt * 180.0/ M_PI) + (1.0 - ALPHA) * accelPitch;
+  pitch = ALPHA * (pitch - g.gyro.z * dt * 180.0 / M_PI) + (1.0 - ALPHA) * accelPitch;
 
   int rawPosition    = getServoPosition(pitch);
   int targetPosition = rawPosition + NEUTRAL_POS + overallOffset;
