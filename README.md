@@ -264,35 +264,33 @@ Real-time wing control system:
 **Hardware:**
 - ESP32 microcontroller
 - MPU6050 (6-axis IMU: 3-axis accelerometer + 3-axis gyroscope)
-- 3 servo motors on pins 16, 17, 18
-- I2C pins: SDA=4, SCL=5
+- 6 servo motors on pins 15, 16, 17, 18, 8, 3
+- I2C pins: SDA=5, SCL=4
 
 **Algorithm:**
-1. **Calibration:** At startup, averages 200 accelerometer readings to find level offset
-2. **Filtering:** Complementary filter combines gyro (fast response) and accelerometer (drift correction)
-   - Filter constant ALPHA = 0.98 (gyro-dominant)
-3. **Servo Mapping:** Reads pitch angle, looks up servo position in `camber_position.h@`, writes same position to all 3 servos
+1. **Startup and IMU calibration:**
+    - Initializes MPU6050 and sets ranges (accel: +/-2g, gyro: +/-250 deg/s, bandwidth: 21 Hz)
+    - Averages 200 accelerometer-based tilt samples to compute `calibrationOffset`
+2. **Angle-of-attack estimation (complementary filter):**
+    - Computes accelerometer pitch and applies sign convention so nose-up is positive
+    - Fuses accelerometer and gyro-Z rate using:
+      - `pitch = ALPHA * (pitch - gyro_z * dt) + (1 - ALPHA) * accelPitch`
+    - Uses `ALPHA = 0.98` for gyro-dominant smoothing
+3. **Lookup and interpolation:**
+    - Uses `getServoPosition(pitch)` to interpolate between nearest entries in `lookupTable`
+    - Clamps to table endpoints when pitch is out of range
+4. **Command shaping and output:**
+    - Forms `targetPosition = rawPosition + NEUTRAL_POS + overallOffset`
+    - Applies per-servo trim offsets from `SERVO_TRIMS[]`
+    - Constrains each servo command to [0, 180] and writes all 6 servos each loop
 
 **Servo Control:**
 - Neutral position: 90°
 - PWM frequency: 50 Hz
-- All servos synchronized to same position
+- Per-servo trim offsets are applied before output
+- All servos follow the same interpolated base command with individual trim compensation
 
-**Missing:** The `camber_position.h` header must define:
-```cpp
-struct ShapeConfig {
-    int angleOfAttack;
-    int servoPosition;
-};
-
-const ShapeConfig lookupTable[] = {
-    { -40, 45 },
-    { -38, 48 },
-    ...
-    { +20, 135 },
-};
-
-const int NUM_SHAPES = sizeof(lookupTable) / sizeof(lookupTable[0]);
-```
-
-Generate this by running `compare.py` on known wing configurations and recording servo positions for each theta angle.
+**Lookup Table (`motor-controls/camber_position.h`):**
+- Defines `ShapeData { float angleOfAttack; int servoPosition; }`
+- Defines `NUM_SHAPES = 35`
+- Provides AoA-to-servo mapping from -20° to +15°
